@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.headtts/
+.codex-*.log
+*.local
