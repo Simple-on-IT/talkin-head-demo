@@ -1,12 +1,15 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createTalkingHead,
   stopTalkingHead
 } from '../../entities/avatar/talkingHeadClient';
+import type { TalkingHeadSceneMode } from '../../entities/avatar/talkingHeadClient';
+import { DEFAULT_AVATAR_ID } from '../../entities/avatar/avatarConfig';
 import type { TalkingHeadInstance } from '../../entities/avatar/types';
 import { playAudioQueue, stopPlayback } from '../../entities/playback/playbackQueue';
-import { HeadTtsAdapter } from '../../entities/tts/adapters/headTtsAdapter';
-import type { TtsVoice } from '../../entities/tts/types';
+import { LocalSileroTtsAdapter } from '../../entities/tts/adapters/localSileroTtsAdapter';
+import type { TtsAudio, TtsVoice } from '../../entities/tts/types';
+import { demoCopy } from './demoCopy';
 import { DEFAULT_DEMO_TEXT } from './demoConfig';
 
 export type DemoStatus =
@@ -18,8 +21,10 @@ export type DemoStatus =
   | 'error';
 
 type TalkingHeadDemoState = {
+  isCinematicMode: boolean;
+  isAdvancedOpen: boolean;
   isBusy: boolean;
-  speed: number;
+  isSpeaking: boolean;
   status: DemoStatus;
   statusText: string;
   text: string;
@@ -29,8 +34,11 @@ type TalkingHeadDemoState = {
 
 type TalkingHeadDemoActions = {
   handleAvatarMount(node: HTMLDivElement | null): void;
+  handleAdvancedToggle(): void;
+  handleBackClick(): void;
+  handleCinematicModeClick(): void;
   handlePlayClick(): Promise<void>;
-  handleSpeedChange(event: React.ChangeEvent<HTMLInputElement>): void;
+  handlePrimaryActionClick(): void;
   handleStopClick(): void;
   handleTextChange(event: React.ChangeEvent<HTMLTextAreaElement>): void;
   handleVoiceChange(event: React.ChangeEvent<HTMLSelectElement>): void;
@@ -38,17 +46,157 @@ type TalkingHeadDemoActions = {
 
 export type TalkingHeadDemoModel = TalkingHeadDemoState & TalkingHeadDemoActions;
 
+type SpeechCache = {
+  audioQueue: TtsAudio[];
+  key: string;
+};
+
+type PersistedDemoSettings = {
+  text?: unknown;
+  voice?: unknown;
+};
+
+const defaultVoiceId = 'kseniya';
+const cinematicModeParam = 'cinematic';
+const settingsStorageKey = 'talkinghead-demo-settings';
+
+function createSpeechCacheKey(text: string, voice: string): string {
+  return `${voice}:${text}`;
+}
+
+function getInitialVoice(voices: TtsVoice[]): string {
+  const persistedVoice = readDemoSettings().voice;
+
+  if (persistedVoice && voices.some((item) => item.id === persistedVoice)) {
+    return persistedVoice;
+  }
+
+  return voices.some((item) => item.id === defaultVoiceId) ? defaultVoiceId : voices[0]?.id ?? 'baya';
+}
+
+function getInitialText(): string {
+  return readDemoSettings().text || DEFAULT_DEMO_TEXT;
+}
+
+function getInitialMode(): boolean {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('mode') === cinematicModeParam;
+}
+
+function getCinematicUrl(): string {
+  const url = new URL(window.location.href);
+  url.searchParams.set('mode', cinematicModeParam);
+  return url.toString();
+}
+
+function getDefaultUrl(): string {
+  const url = new URL(window.location.href);
+  url.searchParams.delete('mode');
+  return url.toString();
+}
+
+function readDemoSettings(): { text: string; voice: string } {
+  try {
+    const rawValue = window.sessionStorage.getItem(settingsStorageKey);
+
+    if (!rawValue) {
+      return { text: '', voice: '' };
+    }
+
+    const settings = JSON.parse(rawValue) as PersistedDemoSettings;
+
+    return {
+      text: typeof settings.text === 'string' ? settings.text : '',
+      voice: typeof settings.voice === 'string' ? settings.voice : ''
+    };
+  } catch {
+    return { text: '', voice: '' };
+  }
+}
+
+function persistDemoSettings(text: string, voice: string): void {
+  try {
+    window.sessionStorage.setItem(
+      settingsStorageKey,
+      JSON.stringify({
+        text,
+        voice
+      })
+    );
+  } catch {
+    // Session storage can be unavailable in locked-down browser contexts.
+  }
+}
+
 export function useTalkingHeadDemo(): TalkingHeadDemoModel {
   const avatarRef = useRef<HTMLDivElement | null>(null);
   const headRef = useRef<TalkingHeadInstance | null>(null);
   const isInitializingAvatarRef = useRef(false);
-  const tts = useMemo(() => new HeadTtsAdapter(), []);
+  const playbackRunIdRef = useRef(0);
+  const prewarmKeyRef = useRef<string | null>(null);
+  const speechCacheRef = useRef<SpeechCache | null>(null);
+  const tts = useMemo(() => new LocalSileroTtsAdapter(), []);
 
-  const [text, setText] = useState(DEFAULT_DEMO_TEXT);
-  const [voice, setVoice] = useState(tts.voices[0]?.id ?? 'af_bella');
-  const [speed, setSpeed] = useState(1);
+  const [isCinematicMode] = useState(getInitialMode);
+  const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
+  const [text, setText] = useState(getInitialText);
+  const [voices, setVoices] = useState<TtsVoice[]>(tts.voices);
+  const [voice, setVoice] = useState(getInitialVoice(tts.voices));
   const [status, setStatus] = useState<DemoStatus>('idle');
-  const [statusText, setStatusText] = useState('Ready');
+  const [statusText, setStatusText] = useState<string>(demoCopy.status.idle);
+  const sceneMode: TalkingHeadSceneMode = isCinematicMode ? 'cinematic' : 'default';
+
+  useEffect(() => {
+    const normalizedText = text.trim();
+    const cacheKey = createSpeechCacheKey(normalizedText, voice);
+
+    if (
+      status !== 'idle' ||
+      normalizedText !== DEFAULT_DEMO_TEXT ||
+      speechCacheRef.current?.key === cacheKey ||
+      prewarmKeyRef.current === cacheKey
+    ) {
+      return undefined;
+    }
+
+    let shouldIgnore = false;
+    prewarmKeyRef.current = cacheKey;
+
+    async function prewarmDefaultSpeech(): Promise<void> {
+      try {
+        await tts.initialize();
+        const audioQueue = await tts.synthesize(normalizedText, { voice });
+
+        if (shouldIgnore) {
+          return;
+        }
+
+        speechCacheRef.current = { audioQueue, key: cacheKey };
+        setVoices(tts.voices);
+        if (!tts.voices.some((item) => item.id === voice)) {
+          setVoice(getInitialVoice(tts.voices));
+        }
+      } catch {
+        if (!shouldIgnore) {
+          speechCacheRef.current = null;
+        }
+      } finally {
+        if (prewarmKeyRef.current === cacheKey) {
+          prewarmKeyRef.current = null;
+        }
+      }
+    }
+
+    void prewarmDefaultSpeech();
+
+    return () => {
+      shouldIgnore = true;
+    };
+  }, [status, text, tts, voice]);
+
+  useEffect(() => {
+    persistDemoSettings(text, voice);
+  }, [text, voice]);
 
   const handleAvatarMount = useCallback((node: HTMLDivElement | null) => {
     avatarRef.current = node;
@@ -59,22 +207,36 @@ export function useTalkingHeadDemo(): TalkingHeadDemoModel {
 
     isInitializingAvatarRef.current = true;
     setStatus('loading-avatar');
-    setStatusText('Loading avatar...');
+    setStatusText(demoCopy.status.loadAvatar);
 
-    createTalkingHead(node)
+    createTalkingHead(node, DEFAULT_AVATAR_ID, sceneMode)
       .then((head) => {
         headRef.current = head;
         setStatus('idle');
-        setStatusText('Avatar is ready');
+        setStatusText(demoCopy.status.avatarReady);
       })
       .catch((error: unknown) => {
         setStatus('error');
-        setStatusText(error instanceof Error ? error.message : 'Avatar failed to load');
+        setStatusText(error instanceof Error ? error.message : demoCopy.status.loadAvatarFailed);
       })
       .finally(() => {
         isInitializingAvatarRef.current = false;
       });
+  }, [sceneMode]);
+
+  const handleAdvancedToggle = useCallback(() => {
+    setIsAdvancedOpen((current) => !current);
   }, []);
+
+  const handleBackClick = useCallback(() => {
+    persistDemoSettings(text, voice);
+    window.location.assign(getDefaultUrl());
+  }, [text, voice]);
+
+  const handleCinematicModeClick = useCallback(() => {
+    persistDemoSettings(text, voice);
+    window.location.assign(getCinematicUrl());
+  }, [text, voice]);
 
   const handleTextChange = useCallback((event: React.ChangeEvent<HTMLTextAreaElement>) => {
     setText(event.target.value);
@@ -84,69 +246,110 @@ export function useTalkingHeadDemo(): TalkingHeadDemoModel {
     setVoice(event.target.value);
   }, []);
 
-  const handleSpeedChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    setSpeed(Number(event.target.value));
-  }, []);
-
   const handlePlayClick = useCallback(async () => {
     const normalizedText = text.trim();
 
     if (!normalizedText) {
       setStatus('error');
-      setStatusText('Enter English text first');
+      setStatusText(demoCopy.status.emptyText);
       return;
     }
 
     if (!headRef.current) {
       setStatus('error');
-      setStatusText('Avatar is still loading');
+      setStatusText(demoCopy.status.avatarNotReady);
       return;
     }
 
+    const playbackRunId = playbackRunIdRef.current + 1;
+    playbackRunIdRef.current = playbackRunId;
+    const cacheKey = createSpeechCacheKey(normalizedText, voice);
+    const cachedAudioQueue =
+      speechCacheRef.current?.key === cacheKey ? speechCacheRef.current.audioQueue : null;
+
     try {
       stopPlayback(headRef.current);
-      tts.stop();
+      if (!cachedAudioQueue) {
+        tts.stop();
+      }
 
-      setStatus('loading-tts');
-      setStatusText('Preparing HeadTTS...');
-      await tts.initialize(setStatusText);
+      let audioQueue = cachedAudioQueue;
+      if (!audioQueue) {
+        setStatus('loading-tts');
+        setStatusText(demoCopy.status.loadTts);
+        await tts.initialize();
+        setVoices(tts.voices);
+        if (!tts.voices.some((item) => item.id === voice)) {
+          setVoice(getInitialVoice(tts.voices));
+        }
 
-      setStatus('synthesizing');
-      setStatusText('Synthesizing speech...');
-      const audioQueue = await tts.synthesize(normalizedText, { voice, speed });
+        setStatus('synthesizing');
+        setStatusText(demoCopy.status.synthesize);
+        audioQueue = await tts.synthesize(normalizedText, { voice });
+        speechCacheRef.current = { audioQueue, key: cacheKey };
+      }
 
       setStatus('speaking');
-      setStatusText('Speaking...');
-      playAudioQueue(headRef.current, audioQueue);
+      setStatusText(demoCopy.status.speak);
+      playAudioQueue(headRef.current, audioQueue, () => {
+        if (playbackRunIdRef.current !== playbackRunId) {
+          return;
+        }
+
+        setStatus('idle');
+        setStatusText(demoCopy.status.idle);
+      });
+
+      if (playbackRunIdRef.current === playbackRunId) {
+        setStatusText(demoCopy.status.speak);
+      }
     } catch (error) {
-      setStatus('error');
-      setStatusText(error instanceof Error ? error.message : 'Speech synthesis failed');
+      if (playbackRunIdRef.current === playbackRunId) {
+        setStatus('error');
+        setStatusText(error instanceof Error ? error.message : demoCopy.status.synthesizeFailed);
+      }
     }
-  }, [speed, text, tts, voice]);
+  }, [text, tts, voice]);
 
   const handleStopClick = useCallback(() => {
+    playbackRunIdRef.current += 1;
     tts.stop();
     stopTalkingHead(headRef.current);
     setStatus('idle');
-    setStatusText('Stopped');
+    setStatusText(demoCopy.status.stopped);
   }, [tts]);
+
+  const handlePrimaryActionClick = useCallback(() => {
+    if (status === 'speaking') {
+      handleStopClick();
+      return;
+    }
+
+    void handlePlayClick();
+  }, [handlePlayClick, handleStopClick, status]);
 
   const isBusy =
     status === 'loading-avatar' || status === 'loading-tts' || status === 'synthesizing';
+  const isSpeaking = status === 'speaking';
 
   return {
+    handleAdvancedToggle,
     handleAvatarMount,
+    handleBackClick,
+    handleCinematicModeClick,
     handlePlayClick,
-    handleSpeedChange,
+    handlePrimaryActionClick,
     handleStopClick,
     handleTextChange,
     handleVoiceChange,
+    isAdvancedOpen,
     isBusy,
-    speed,
+    isCinematicMode,
+    isSpeaking,
     status,
     statusText,
     text,
     voice,
-    voices: tts.voices
+    voices
   };
 }

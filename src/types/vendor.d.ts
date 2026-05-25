@@ -7,10 +7,19 @@ declare module '@met4citizen/talkinghead' {
     ): Promise<void>;
     setView(view: string, options?: Record<string, unknown>): void;
     setLighting(options: Record<string, unknown>): void;
+    setValue(target: string, value: number, durationMs?: number | null): void;
+    lookAtCamera(t: number): void;
+    makeEyeContact(t: number): void;
     speakAudio(
       data: Record<string, unknown>,
       options?: Record<string, unknown>,
       onsubtitles?: (word: string) => void
+    ): void;
+    speakText(
+      text: string,
+      options?: Record<string, unknown>,
+      onsubtitles?: (word: string) => void,
+      excludes?: number[][]
     ): void;
     stopSpeaking?(): void;
     stop?(): void;
@@ -18,26 +27,14 @@ declare module '@met4citizen/talkinghead' {
   }
 }
 
-declare module '@met4citizen/headtts' {
-  export class HeadTTS {
-    constructor(options?: Record<string, unknown>);
-    connect(
-      settings?: Record<string, unknown> | null,
-      onprogress?: (event: ProgressEvent) => void,
-      onerror?: (event: Event) => void
-    ): Promise<void>;
-    setup(data: Record<string, unknown>, onerror?: (event: Event) => void): Promise<void>;
-    synthesize(
-      data: Record<string, unknown>,
-      onmessage?: (message: HeadTtsMessage) => void,
-      onerror?: (event: Event) => void
-    ): Promise<HeadTtsMessage[]>;
-    clear(): void;
+declare module '@met4citizen/talkinghead/modules/lipsync-en.mjs' {
+  export class LipsyncEn {
+    preProcessText(text: string): string;
+    wordsToVisemes(word: string): {
+      durations: number[];
+      times: number[];
+      visemes: string[];
+    };
   }
-
-  export type HeadTtsMessage = {
-    type: 'audio' | 'error' | 'custom';
-    data: Record<string, unknown>;
-  };
 }
 

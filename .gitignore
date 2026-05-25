@@ -1,5 +1,9 @@
 node_modules/
 dist/
-.headtts/
+test-results/
+.tmp-tests/
+__pycache__/
+.silero/
 .codex-*.log
+scripts/viseme_*.png
 *.local

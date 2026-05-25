@@ -7,7 +7,6 @@ export type TtsAudio = Record<string, unknown>;
 
 export type SynthesizeOptions = {
   voice: string;
-  speed: number;
 };
 
 export type TtsAdapter = {
